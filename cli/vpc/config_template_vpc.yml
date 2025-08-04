@@ -1,0 +1,482 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+  This template deploys a VPC, with a pair of public and private subnets spread
+  across two Availabilty Zones. It deploys an Internet Gateway, with a default
+  route on the public subnets. It deploys a pair of NAT Gateways (one in each AZ),
+  and default routes for them in the private subnets.
+
+# ------------
+# Metadata
+# ------------
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: "Naming setting for Tags"
+        Parameters:
+          - Environment
+
+# ------------
+# Parameters
+# ------------
+Parameters:
+  Environment:
+    Description: An environment name that will be prefixed to resource names
+    Type: String
+    Default: ${devenv}
+
+  # 80 for HTTP (ELB)
+  ELBIngressPort:
+    Description: The ELB ingress port used by security groups
+    Type: Number
+    MinValue: 0
+    MaxValue: 65535
+    ConstraintDescription: TCP ports must be between 0 - 65535
+    Default: 80
+
+  # 443 for HTTPS (ELB)
+  ELBIngressPort443:
+    Description: The ELB ingress port used by security groups
+    Type: Number
+    MinValue: 0
+    MaxValue: 65535
+    ConstraintDescription: TCP ports must be between 0 - 65535
+    Default: 443
+
+  # APP Ingress Port 80 for HTTP
+  AppIngressPort:
+    Description: The application ingress port used by security groups
+    Type: Number
+    MinValue: 0
+    MaxValue: 65535
+    ConstraintDescription: TCP ports must be between 0 - 65535
+    Default: 80
+
+  SingleNatGateway:
+    Description: Set to true to only install one NAT gateway
+    Type: String
+    ConstraintDescription: Value must be true or false
+    Default: true
+    AllowedValues:
+      - true
+      - false
+
+  VpcCIDR:
+    Description: Please enter the IP range (CIDR notation) for this VPC
+    Type: String
+    Default: 10.0.0.0/16
+
+  PublicSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the first Availability Zone
+    Type: String
+    Default: 10.0.0.0/19
+
+  PublicSubnet2CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the second Availability Zone
+    Type: String
+    Default: 10.0.32.0/19
+
+  PrivateSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the first Availability Zone
+    Type: String
+    Default: 10.0.64.0/19
+
+  PrivateSubnet2CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the second Availability Zone
+    Type: String
+    Default: 10.0.96.0/19
+
+# ------------
+# Conditions
+# ------------
+Conditions:
+  CreateSingleNatGateway: !Equals [ !Ref SingleNatGateway, true ]
+  CreateMultipleNatGateways: !Not [ Condition: CreateSingleNatGateway ]
+
+# ------------
+# Resources
+# ------------
+Resources:
+  # ------------
+  # VPC
+  # ------------
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-${Environment}
+  # ------------
+  # InternetGateway
+  # ------------
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-${Environment}-igw
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+  # ------------
+  # Subnet
+  # ------------
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-${Environment}-public-subnet1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 2, !GetAZs '' ]
+      CidrBlock: !Ref PublicSubnet2CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-${Environment}-public-subnet2
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-${Environment}-private-subnet1
+        - Key: "kubernetes.io/role/internal-elb"
+          Value: "1"
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 2, !GetAZs '' ]
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-${Environment}-private-subnet2
+        - Key: "kubernetes.io/role/internal-elb"
+          Value: "1"
+  # ------------
+  # NAT
+  # ------------
+  NatGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-${Environment}-eip-1
+
+  NatGateway2EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Condition: CreateMultipleNatGateways
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-${Environment}-eip-2
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      AllocationId: !GetAtt NatGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-${Environment}-nat-gateway-1
+
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    DependsOn: InternetGatewayAttachment
+    Condition: CreateMultipleNatGateways
+    Properties:
+      AllocationId: !GetAtt NatGateway2EIP.AllocationId
+      SubnetId: !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-${Environment}-nat-gateway-2
+  # ------------
+  # RouteTable
+  # ------------
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-${Environment}-public-routes
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetNetworkAclAssociation1:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      NetworkAclId: !GetAtt VPC.DefaultNetworkAcl
+
+  PublicSubnetNetworkAclAssociation2:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      NetworkAclId: !GetAtt VPC.DefaultNetworkAcl
+
+
+  NatRouteTable1:
+    Type: AWS::EC2::RouteTable
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-${Environment}-private-nat-1"
+
+  NatRouteTable2:
+    Type: AWS::EC2::RouteTable
+    DependsOn: InternetGatewayAttachment
+    Condition: CreateMultipleNatGateways
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-${Environment}-private-nat-2"
+
+  NatRoute1:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref NatRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  NatRoute2:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Condition: CreateMultipleNatGateways
+    Properties:
+      RouteTableId: !Ref NatRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway2
+
+  PrivateSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref NatRouteTable1
+
+  PrivateSubnetRouteTableAssociationSingleNatGateway:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateSingleNatGateway
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref NatRouteTable1
+
+  PrivateSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateMultipleNatGateways
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref NatRouteTable2
+
+  # -------------
+  # SecurityGroup
+  # -------------
+  ELBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP/HTTPs ingress
+      GroupName: !Sub ${AWS::StackName}-${Environment}-elb-sg
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: tcp
+        ToPort: !Ref ELBIngressPort
+        FromPort: !Ref ELBIngressPort
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: tcp
+        ToPort: !Ref ELBIngressPort443
+        FromPort: !Ref ELBIngressPort443
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-${Environment}-elb-security-group"
+
+  ELBSecurityGroupToAppEgress:
+    Type: AWS::EC2::SecurityGroupEgress  # prevent security group circular references
+    Properties:
+      Description: Enable access from App to ELB
+      GroupId: !Ref ELBSecurityGroup
+      IpProtocol: tcp
+      ToPort: !Ref AppIngressPort
+      FromPort: !Ref AppIngressPort
+      DestinationSecurityGroupId: !Ref AppSecurityGroup
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable access from ELB to App
+      GroupName: !Sub ${AWS::StackName}-${Environment}-app-sg
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - SourceSecurityGroupId: !Ref ELBSecurityGroup
+        IpProtocol: tcp
+        ToPort: !Ref AppIngressPort
+        FromPort: !Ref AppIngressPort
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-${Environment}-app-security-group"
+
+  AppSecurityGroupFromELBIngress:
+    Type: AWS::EC2::SecurityGroupIngress  # prevent security group circular references
+    Properties:
+      Description: Enable access from ELB to App
+#      GroupName: !Sub ${AWS::StackName}-${Environment}-elb-app-sg-ing
+      GroupId: !Ref AppSecurityGroup
+      IpProtocol: tcp
+      ToPort: !Ref AppIngressPort
+      FromPort: !Ref AppIngressPort
+      SourceSecurityGroupId: !Ref ELBSecurityGroup
+
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable access to the RDS DB
+      GroupName: !Sub ${AWS::StackName}-${Environment}-db-sg
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: tcp
+        ToPort: 3306
+        FromPort: 3306
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: tcp
+        ToPort: 5432
+        FromPort: 5432
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-${Environment}-db-security-group"
+
+  DbSecurityGroupFromAppPostgreSqlIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Enable access from App to PostgreSql Db
+#      GroupName: !Sub ${AWS::StackName}-${Environment}-app-pgdb-sg-ing
+      GroupId: !Ref DbSecurityGroup
+      IpProtocol: tcp
+      ToPort: 5432
+      FromPort: 5432
+      SourceSecurityGroupId: !Ref AppSecurityGroup
+
+  DbSecurityGroupFromAppMySqlIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Enable access from App to MySQL Db
+#      GroupName: !Sub ${AWS::StackName}-${Environment}-app-mydb-sg-ing
+      GroupId: !Ref DbSecurityGroup
+      IpProtocol: tcp
+      ToPort: 3306
+      FromPort: 3306
+      SourceSecurityGroupId: !Ref AppSecurityGroup
+
+# ------------
+# Outputs
+# ------------
+Outputs:
+  Name:
+    Description: VPC Stack Name
+    Value: !Ref AWS::StackName
+    Export:
+      Name: !Sub ${AWS::StackName}:${Environment}:Name
+  VPC:
+    Description: A reference to the created VPC
+    Value: !Ref VPC
+    Export:
+      Name: !Sub "${AWS::StackName}:${Environment}:VPC"
+  PublicSubnet1:
+    Description: A reference to the public subnet in the 1st Availability Zone
+    Value: !Ref PublicSubnet1
+    Export:
+      Name: !Sub "${AWS::StackName}:${Environment}:PublicSubnet1"
+  PublicSubnet2:
+    Description: A reference to the public subnet in the 3rd Availability Zone
+    Value: !Ref PublicSubnet2
+    Export:
+      Name: !Sub "${AWS::StackName}:${Environment}:PublicSubnet2"
+  PrivateSubnet1:
+    Description: A reference to the private subnet in the 1st Availability Zone
+    Value: !Ref PrivateSubnet1
+    Export:
+      Name: !Sub "${AWS::StackName}:${Environment}:PrivateSubnet1"
+  PrivateSubnet2:
+    Description: A reference to the private subnet in the 3rd Availability Zone
+    Value: !Ref PrivateSubnet2
+    Export:
+      Name: !Sub "${AWS::StackName}:${Environment}:PrivateSubnet2"
+  VpcCIDR:
+    Description: VPC CIDR
+    Value: !Ref VpcCIDR
+    Export:
+      Name: !Sub "${AWS::StackName}:${Environment}:VpcCIDR"
+  ELBSecurityGroup:
+    Description: Security group ID for Internet-facing ELB
+    Value: !GetAtt ELBSecurityGroup.GroupId
+    Export:
+      Name: !Sub "${AWS::StackName}:${Environment}:ELBSecurityGroup"
+  AppSecurityGroup:
+    Description: Security group ID for app behind ELB
+    Value: !GetAtt AppSecurityGroup.GroupId
+    Export:
+      Name: !Sub "${AWS::StackName}:${Environment}:AppSecurityGroup"
+  DatabaseSecurityGroup:
+    Description: Security group ID for RDS database
+    Value: !GetAtt DbSecurityGroup.GroupId
+    Export:
+      Name: !Sub "${AWS::StackName}:${Environment}:DatabaseGroup"
+  ELBIngressPort:
+    Description: ELB ingress port
+    Value: !Ref ELBIngressPort
+    Export:
+      Name: !Sub "${AWS::StackName}:${Environment}:ELBIngressPort"
+  AppIngressPort:
+    Description: App ingress port
+    Value: !Ref AppIngressPort
+    Export:
+      Name: !Sub "${AWS::StackName}:${Environment}:AppIngressPort"

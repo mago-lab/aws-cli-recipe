@@ -1,0 +1,22 @@
+# MAGO's <service_name> service
+
+services:
+   <image_name>:
+    image: <image_name>:latest
+    container_name:  <image_name>
+    environment:
+      - LC_ALL=C.UTF-8
+    build:
+      context: .
+      dockerfile: .docker/Dockerfile
+    stdin_open: true
+    tty: true
+    volumes:
+      - /home/ubuntu/mago-services/<image_name>/uploads:/deepsaturn/<planet>/<service_name>/uploads
+      - /home/ubuntu/mago-services/<image_name>/models:/deepsaturn/<planet>/<service_name>/models
+      - /etc/localtime:/etc/localtime:ro
+    cap_add:
+      - SYS_ADMIN
+    ports:
+      - 80:<serivce_port>
+    entrypoint: ["bash", "./scripts/run_app.sh"]
